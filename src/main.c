@@ -43,6 +43,9 @@ static void usage(FILE *f) {
         "  --slow-ns N           slow full clock period, default 12500 ns\n"
         "  --fast-ns N           fast full clock period, default 2000 ns\n"
         "  --sample-delay-ns N   delay after CLK rising before MISO sample, default 0\n"
+        "  --mosi-setup-ns N     MOSI setup before falling edge; 0=auto mid-high\n"
+        "  --legacy-mosi-after-fall\n"
+        "                        old diagnostic mode: change MOSI just after CLK falling\n"
         "  --timeout-us N        timeout waiting for CLK high, default 100000 us\n"
         "  --no-clk-pullup       do not enable Pi's weak internal pull-up on CLK\n"
         "  --no-wait-clk-high    do not wait when lens holds CLK low\n"
@@ -247,6 +250,10 @@ int main(int argc, char **argv) {
             if (parse_u32(argv[++argi], &cfg.fast_period_ns) < 0) goto badopt;
         } else if (strcmp(a, "--sample-delay-ns") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.sample_delay_ns) < 0) goto badopt;
+        } else if (strcmp(a, "--mosi-setup-ns") == 0 && argi + 1 < argc) {
+            if (parse_u32(argv[++argi], &cfg.mosi_setup_ns) < 0) goto badopt;
+        } else if (strcmp(a, "--legacy-mosi-after-fall") == 0) {
+            cfg.legacy_mosi_after_fall = true;
         } else if (strcmp(a, "--timeout-us") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.clk_high_timeout_us) < 0) goto badopt;
         } else if (strcmp(a, "--no-clk-pullup") == 0) {

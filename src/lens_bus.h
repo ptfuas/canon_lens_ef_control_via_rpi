@@ -23,7 +23,22 @@ typedef struct {
 
     uint32_t slow_period_ns;     /* Full clock period, default ~12.5 us. */
     uint32_t fast_period_ns;     /* Full clock period, default 2.0 us. */
-    uint32_t sample_delay_ns;    /* Extra delay after CLK rising before sampling MISO. */
+    uint32_t sample_delay_ns;    /* Extra delay after CLK rising before MISO sample. */
+
+    /* MOSI timing, normal mode:
+     *   - CLK idles/released high.
+     *   - MOSI is prepared BEFORE the next falling edge.
+     *   - For bits after the first, MOSI is updated during the high phase,
+     *     away from the rising/falling edges. With mosi_setup_ns == 0, the
+     *     update is placed halfway through the high phase, so the new value is
+     *     valid for roughly half a high-period before the next falling edge.
+     *
+     * This fixes the previous behaviour where MOSI changed immediately after
+     * the falling edge, which made the first falling edge look ignored on the
+     * oscilloscope/logic analyser.
+     */
+    uint32_t mosi_setup_ns;      /* 0 = automatic: half of CLK-high time. */
+    bool legacy_mosi_after_fall; /* Old diagnostic mode only. Default false. */
 
     bool clk_internal_pullup;    /* Configure weak Pi pull-up on CLK input. */
     bool wait_clk_high;          /* Respect lens clock stretching before/after edges. */
@@ -60,17 +75,17 @@ void lens_clk_release(lens_bus_t *bus);
 int  lens_clk_read(const lens_bus_t *bus);
 int  lens_wait_clk_high(lens_bus_t *bus, uint32_t timeout_us);
 
-int lens_bus_transfer(lens_bus_t *bus,
-                      lens_speed_t speed,
-                      const uint8_t *tx,
-                      uint8_t *rx,
-                      size_t len);
-
 int lens_bus_transfer_period(lens_bus_t *bus,
                              uint32_t period_ns,
                              const uint8_t *tx,
                              uint8_t *rx,
                              size_t len);
+
+int lens_bus_transfer(lens_bus_t *bus,
+                      lens_speed_t speed,
+                      const uint8_t *tx,
+                      uint8_t *rx,
+                      size_t len);
 
 const char *lens_strerror(int rc);
 
