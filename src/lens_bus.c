@@ -258,11 +258,7 @@ static int transfer_byte(lens_bus_t *bus, uint32_t period_ns, uint8_t tx, uint8_
     return 0;
 }
 
-int lens_bus_transfer_period(lens_bus_t *bus,
-                             uint32_t period_ns,
-                             const uint8_t *tx,
-                             uint8_t *rx,
-                             size_t len) {
+int lens_bus_transfer_period(lens_bus_t *bus, uint32_t period_ns, const uint8_t *tx, uint8_t *rx, size_t len) {
     if (!bus || !tx || len == 0) return -EINVAL;
     if (!bus->gpio.regs) return -ENODEV;
 
@@ -286,13 +282,8 @@ int lens_bus_transfer_period(lens_bus_t *bus,
     return 0;
 }
 
-int lens_bus_transfer(lens_bus_t *bus,
-                      lens_speed_t speed,
-                      const uint8_t *tx,
-                      uint8_t *rx,
-                      size_t len) {
-    const uint32_t period = (speed == LENS_SPEED_FAST) ? bus->cfg.fast_period_ns
-                                                        : bus->cfg.slow_period_ns;
+int lens_bus_transfer(lens_bus_t *bus, lens_speed_t speed, const uint8_t *tx, uint8_t *rx, size_t len) {
+    const uint32_t period = (speed == LENS_SPEED_FAST) ? bus->cfg.fast_period_ns : bus->cfg.slow_period_ns;
     return lens_bus_transfer_period(bus, period, tx, rx, len);
 }
 

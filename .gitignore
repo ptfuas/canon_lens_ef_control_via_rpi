@@ -1,0 +1,5 @@
+src/gpio_rpi.o
+src/lens_bus.o
+src/main.o
+src/lens_proto.o
+lensctl

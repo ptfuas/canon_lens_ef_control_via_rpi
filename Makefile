@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS ?= -O3 -std=c11 -Wall -Wextra -Wpedantic
+CFLAGS ?= -g -O0 -std=c11 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
 LDLIBS ?=
 
