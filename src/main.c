@@ -174,6 +174,10 @@ static int do_init(lens_bus_t *bus) {
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
 
+
+
+
+    
     printf("basic numeric lens info...\n");
     rc = lens_read_basic_info(bus, &bi);
     if (rc < 0) return rc;
@@ -280,7 +284,7 @@ int main(int argc, char **argv) {
     if (want_rt) (void)enable_realtime();
 
     lens_bus_t bus;
-    int rc = lens_bus_open(&bus, &cfg);
+    int rc = lens_bus_open(&bus, &cfg); // configures clk pin with weak pull and input, MISO as input and set MOSI as 0 and output 
     if (rc < 0) {
         fprintf(stderr, "lens_bus_open failed: %s (%d)\n", lens_strerror(rc), rc);
         return 1;

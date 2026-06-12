@@ -134,8 +134,8 @@ int lens_bus_open(lens_bus_t *bus, const lens_bus_config_t *cfg) {
     if (rc < 0) return rc;
 
 #if defined(__aarch64__)
-    bus->arch_timer_freq_hz = read_cntfrq_el0();
-    bus->has_arch_timer = bus->arch_timer_freq_hz > 0;
+    bus->arch_timer_freq_hz = read_cntfrq_el0();  // 19.2Mhz
+    bus->has_arch_timer = bus->arch_timer_freq_hz > 0; // True
 #else
     bus->has_arch_timer = false;
     bus->arch_timer_freq_hz = 0;
@@ -162,7 +162,7 @@ int lens_bus_open(lens_bus_t *bus, const lens_bus_config_t *cfg) {
     rpi_gpio_write(&bus->gpio, cfg->clk_gpio, false); /* output latch is low for future open-drain pulls */
     rpi_gpio_set_input(&bus->gpio, cfg->clk_gpio);
     rpi_gpio_set_pull_legacy(&bus->gpio, cfg->clk_gpio,
-                             cfg->clk_internal_pullup ? RPI_GPIO_PULL_UP : RPI_GPIO_PULL_OFF);
+                             cfg->clk_internal_pullup ? RPI_GPIO_PULL_UP : RPI_GPIO_PULL_OFF);  // activates physical pull-up in clk pin
 
     return 0;
 }
@@ -369,7 +369,7 @@ int lens_bus_transfer_period(lens_bus_t *bus,
     if (!bus || !tx || len == 0) return -EINVAL;
     if (!bus->gpio.regs) return -ENODEV;
 
-    lens_clk_release(bus);
+    lens_clk_release(bus);  // releases clock (if lens is trying to capture it, the next lens_wait_clk_high will block, but expected case is that lens is not grabbing it)
     if (bus->cfg.wait_clk_high) {
         int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
         if (rc < 0) return rc;
