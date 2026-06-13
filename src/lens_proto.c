@@ -7,7 +7,7 @@
 
 int lens_ready_alive(lens_bus_t *bus, uint8_t rx[4]) {
     const uint8_t tx[4] = {0x0A, 0x00, 0x0A, 0x00};
-    return lens_bus_transfer(bus, LENS_SPEED_SLOW, tx, rx, sizeof(tx));
+    return lens_bus_transfer(bus, LENS_SPEED_SLOW, tx, rx, sizeof(tx)); // sends all the sequence above
 }
 
 int lens_read_basic_info(lens_bus_t *bus, lens_basic_info_t *info) {
