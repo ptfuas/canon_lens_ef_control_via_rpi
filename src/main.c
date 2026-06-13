@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <sched.h>
@@ -40,12 +41,15 @@ static void usage(FILE *f) {
         "  --mosi N              BCM GPIO for DCL/MOSI, default 17\n"
         "  --miso N              BCM GPIO for DLC/MISO, default 27\n"
         "  --clk N               BCM GPIO for CLK, default 22\n"
-        "  --slow-ns N           slow full clock period, default 12500 ns\n"
-        "  --fast-ns N           fast full clock period, default 2000 ns\n"
+        "  --slow-ns N           slow full clock period, default 12835 ns = 77.91 kHz\n"
+        "  --fast-ns N           fast full clock period, default 2000 ns = 500 kHz\n"
+        "  --slow-hz HZ          set slow period from frequency, e.g. 77910\n"
+        "  --fast-hz HZ          set fast period from frequency, e.g. 500000\n"
         "  --sample-delay-ns N   delay after CLK rising before MISO sample, default 0\n"
         "  --mosi-setup-ns N     MOSI setup before falling edge; 0=auto mid-high\n"
         "  --legacy-mosi-after-fall\n"
         "                        old diagnostic mode: change MOSI just after CLK falling\n"
+        "  --additive-timing     old v2 timing: delays are added after each GPIO operation\n"
         "  --timeout-us N        timeout waiting for CLK high, default 100000 us\n"
         "  --no-clk-pullup       do not enable Pi's weak internal pull-up on CLK\n"
         "  --no-wait-clk-high    do not wait when lens holds CLK low\n"
@@ -68,6 +72,8 @@ static void usage(FILE *f) {
         "  name                  fast 0x82 then repeated 0x83 reads\n"
         "  xfer-slow BYTES...    raw slow transfer, prints RX\n"
         "  xfer-fast BYTES...    raw fast transfer, prints RX\n"
+        "  train-slow [BYTES...] repeat raw slow transfer until Ctrl+C, default 0x0A\n"
+        "  train-fast [BYTES...] repeat raw fast transfer until Ctrl+C, default 0x55\n"
         "  clk-release           release CLK to input/high-Z and print level\n"
         "  clk-low               pull CLK low until the process exits; Ctrl+C releases\n"
         "\n"
@@ -85,6 +91,18 @@ static int parse_u32(const char *s, uint32_t *out) {
     unsigned long v = strtoul(s, &end, 0);
     if (errno || end == s || *end != '\0' || v > UINT32_MAX) return -EINVAL;
     *out = (uint32_t)v;
+    return 0;
+}
+
+static int parse_period_from_hz(const char *s, uint32_t *period_ns) {
+    if (!s || !*s || !period_ns) return -EINVAL;
+    char *end = NULL;
+    errno = 0;
+    double hz = strtod(s, &end);
+    if (errno || end == s || *end != '\0' || hz <= 0.0 || hz > 100000000.0) return -EINVAL;
+    double ns = 1000000000.0 / hz;
+    if (ns < 1.0 || ns > (double)UINT32_MAX) return -EINVAL;
+    *period_ns = (uint32_t)(ns + 0.5);
     return 0;
 }
 
@@ -158,6 +176,43 @@ static int raw_xfer(lens_bus_t *bus, lens_speed_t speed, int argc, char **argv) 
     return 0;
 }
 
+static int raw_train(lens_bus_t *bus, lens_speed_t speed, int argc, char **argv) {
+    uint8_t tx[256];
+    uint8_t rx[256];
+    int n = argc;
+
+    if (n <= 0) {
+        tx[0] = (speed == LENS_SPEED_FAST) ? 0x55u : 0x0Au;
+        n = 1;
+    } else {
+        if (n > (int)sizeof(tx)) return -EINVAL;
+        for (int i = 0; i < n; ++i) {
+            int rc = parse_u8(argv[i], &tx[i]);
+            if (rc < 0) return rc;
+        }
+    }
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    g_stop = 0;
+
+    printf("Repeating %s transfer of %d byte(s) until Ctrl+C.\n",
+           speed == LENS_SPEED_FAST ? "fast" : "slow", n);
+    print_bytes("TX:", tx, (size_t)n);
+    fflush(stdout);
+
+    while (!g_stop) {
+        int rc = lens_bus_transfer(bus, speed, tx, rx, (size_t)n);
+        if (rc < 0) return rc;
+    }
+
+    lens_clk_release(bus);
+    return 0;
+}
+
 static int do_init(lens_bus_t *bus) {
     int rc;
     uint8_t rx4[4];
@@ -177,7 +232,7 @@ static int do_init(lens_bus_t *bus) {
 
 
 
-    
+
     printf("basic numeric lens info...\n");
     rc = lens_read_basic_info(bus, &bi);
     if (rc < 0) return rc;
@@ -252,12 +307,18 @@ int main(int argc, char **argv) {
             if (parse_u32(argv[++argi], &cfg.slow_period_ns) < 0) goto badopt;
         } else if (strcmp(a, "--fast-ns") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.fast_period_ns) < 0) goto badopt;
+        } else if (strcmp(a, "--slow-hz") == 0 && argi + 1 < argc) {
+            if (parse_period_from_hz(argv[++argi], &cfg.slow_period_ns) < 0) goto badopt;
+        } else if (strcmp(a, "--fast-hz") == 0 && argi + 1 < argc) {
+            if (parse_period_from_hz(argv[++argi], &cfg.fast_period_ns) < 0) goto badopt;
         } else if (strcmp(a, "--sample-delay-ns") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.sample_delay_ns) < 0) goto badopt;
         } else if (strcmp(a, "--mosi-setup-ns") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.mosi_setup_ns) < 0) goto badopt;
         } else if (strcmp(a, "--legacy-mosi-after-fall") == 0) {
             cfg.legacy_mosi_after_fall = true;
+        } else if (strcmp(a, "--additive-timing") == 0) {
+            cfg.additive_timing = true;
         } else if (strcmp(a, "--timeout-us") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.clk_high_timeout_us) < 0) goto badopt;
         } else if (strcmp(a, "--no-clk-pullup") == 0) {
@@ -284,7 +345,7 @@ int main(int argc, char **argv) {
     if (want_rt) (void)enable_realtime();
 
     lens_bus_t bus;
-    int rc = lens_bus_open(&bus, &cfg); // configures clk pin with weak pull and input, MISO as input and set MOSI as 0 and output 
+    int rc = lens_bus_open(&bus, &cfg);
     if (rc < 0) {
         fprintf(stderr, "lens_bus_open failed: %s (%d)\n", lens_strerror(rc), rc);
         return 1;
@@ -351,6 +412,10 @@ int main(int argc, char **argv) {
         rc = raw_xfer(&bus, LENS_SPEED_SLOW, argc - argi, &argv[argi]);
     } else if (strcmp(cmd, "xfer-fast") == 0) {
         rc = raw_xfer(&bus, LENS_SPEED_FAST, argc - argi, &argv[argi]);
+    } else if (strcmp(cmd, "train-slow") == 0) {
+        rc = raw_train(&bus, LENS_SPEED_SLOW, argc - argi, &argv[argi]);
+    } else if (strcmp(cmd, "train-fast") == 0) {
+        rc = raw_train(&bus, LENS_SPEED_FAST, argc - argi, &argv[argi]);
     } else if (strcmp(cmd, "clk-release") == 0) {
         lens_clk_release(&bus);
         rc = lens_wait_clk_high(&bus, cfg.clk_high_timeout_us);

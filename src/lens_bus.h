@@ -21,7 +21,7 @@ typedef struct {
     unsigned miso_gpio;          /* Lens -> camera/Pi, Canon DLC in your notes. */
     unsigned clk_gpio;           /* Open-drain/open-collector clock line. */
 
-    uint32_t slow_period_ns;     /* Full clock period, default ~12.5 us. */
+    uint32_t slow_period_ns;     /* Full clock period, default 12835 ns, ~77.91 kHz. */
     uint32_t fast_period_ns;     /* Full clock period, default 2.0 us. */
     uint32_t sample_delay_ns;    /* Extra delay after CLK rising before MISO sample. */
 
@@ -39,6 +39,7 @@ typedef struct {
      */
     uint32_t mosi_setup_ns;      /* 0 = automatic: half of CLK-high time. */
     bool legacy_mosi_after_fall; /* Old diagnostic mode only. Default false. */
+    bool additive_timing;        /* Old v2 delay-after-each-operation timing. Default false. */
 
     bool clk_internal_pullup;    /* Configure weak Pi pull-up on CLK input. */
     bool wait_clk_high;          /* Respect lens clock stretching before/after edges. */
