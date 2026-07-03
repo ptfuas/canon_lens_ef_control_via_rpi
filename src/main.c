@@ -229,7 +229,7 @@ static int do_init(lens_bus_t *bus) {
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
 
-
+    return 0;
 
 
 

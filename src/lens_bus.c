@@ -130,7 +130,7 @@ void lens_bus_default_config(lens_bus_config_t *cfg) {
     cfg->legacy_mosi_after_fall = false;
     cfg->additive_timing = false;
     cfg->clk_internal_pullup = true;
-    cfg->wait_clk_high = true;
+    cfg->wait_clk_high = false;
     cfg->clk_high_timeout_us = 100000; /* 100 ms, enough for observed aperture busy times. */
 }
 
@@ -321,17 +321,46 @@ static inline void rx_store_bit(uint8_t *rx, size_t bit_index, bool bit) {
     rx[byte_index] |= (uint8_t)(1u << bit_in_byte);
 }
 
-static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
-                                                   uint32_t period_ns,
-                                                   const uint8_t *tx,
-                                                   uint8_t *rx,
-                                                   size_t len) {
-    const size_t total_bits = len * 8u;
-    const uint32_t low_ns  = period_ns / 2u;
+
+static int lens_wait_clk_low_then_high(lens_bus_t *bus,
+                                      uint32_t low_start_timeout_us,
+                                      uint32_t high_release_timeout_us) {
+#if defined(__aarch64__)
+    if (bus->has_arch_timer && bus->arch_timer_freq_hz) {
+        const uint64_t timeout_ticks = ns_to_ticks((uint64_t)low_start_timeout_us * 1000ull,
+                                                   bus->arch_timer_freq_hz);
+        const uint64_t start = read_cntvct_el0();
+
+        /* Wait until the lens pulls the real CLK line low. */
+        while (lens_clk_read(bus)) {
+            if ((read_cntvct_el0() - start) >= timeout_ticks) return -ETIMEDOUT;
+            cpu_relax();
+        }
+
+        /* Now wait until the lens releases CLK high again. */
+        return lens_wait_clk_high(bus, high_release_timeout_us);
+    }
+#endif
+
+    const uint64_t timeout_ns = (uint64_t)low_start_timeout_us * 1000ull;
+    const uint64_t start = now_ns_fallback();
+
+    while (lens_clk_read(bus)) {
+        if ((now_ns_fallback() - start) >= timeout_ns) return -ETIMEDOUT;
+        cpu_relax();
+    }
+
+    return lens_wait_clk_high(bus, high_release_timeout_us);
+}
+
+static int transfer_byte_mosi_mid_high_absolute(lens_bus_t *bus,
+                                                uint32_t period_ns,
+                                                uint8_t tx,
+                                                uint8_t *rx) {
+    const uint32_t correction_factor = (uint32_t)((uint64_t)period_ns * 8u / 100u);
+    const uint32_t low_ns  = (period_ns - correction_factor) / 2u;
     const uint32_t high_ns = period_ns - low_ns;
 
-    /* Default: update MOSI at the middle of the nominal high phase.
-     * setup_before_fall_ns is the MOSI setup time before the next falling edge. */
     uint32_t setup_before_fall_ns = bus->cfg.mosi_setup_ns;
     if (setup_before_fall_ns == 0) setup_before_fall_ns = high_ns / 2u;
     if (setup_before_fall_ns > high_ns) setup_before_fall_ns = high_ns;
@@ -341,28 +370,26 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
     const uint64_t setup_ticks  = bus_ns_to_ticks(bus, setup_before_fall_ns);
     const uint64_t sample_ticks = bus_ns_to_ticks(bus, bus->cfg.sample_delay_ns);
 
-    if (rx) memset(rx, 0, len);
-    if (total_bits == 0) return 0;
+    uint8_t in = 0;
 
-    /* CLK idles/released high. Prepare bit 7 early, then schedule the first
-     * falling edge. From here on, falling edges are scheduled at absolute
-     * period boundaries, so GPIO register overhead and CLK-rise wait time do
-     * not accumulate into the clock period. */
+    /* CLK idles/released high. Prepare bit 7 before the first falling edge. */
     lens_clk_release(bus);
     if (bus->cfg.wait_clk_high) {
         int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
         if (rc < 0) return rc;
     }
 
-    mosi_write(bus, tx_bit_at(tx, 0));
+    mosi_write(bus, (tx & 0x80u) != 0);
+
     uint64_t fall_time = bus_now_ticks(bus) + setup_ticks;
     wait_until_ticks(bus, fall_time);
 
-    for (size_t bit_index = 0; bit_index < total_bits; ++bit_index) {
+    for (int bit = 7; bit >= 0; --bit) {
+        const bool last_bit = (bit == 0);
         const uint64_t rise_release_time = fall_time + low_ticks;
         uint64_t next_fall_time = fall_time + period_ticks;
 
-        /* Current MOSI bit is already valid here. */
+        /* Falling edge for this bit. MOSI is already stable. */
         lens_clk_drive_low(bus);
 
         wait_until_ticks(bus, rise_release_time);
@@ -376,30 +403,117 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
         if (sample_ticks) {
             wait_until_ticks(bus, bus_now_ticks(bus) + sample_ticks);
         }
-        rx_store_bit(rx, bit_index, miso_read(bus) != 0);
 
-        if (bit_index + 1u < total_bits) {
-            /* Update MOSI in the high phase, nominally halfway before the next
-             * falling edge. If the lens/RC rise consumed too much time, write
-             * immediately and, if needed, push the next fall enough to preserve
-             * at least setup_before_fall_ns of MOSI setup. */
+        in = (uint8_t)((in << 1) | (miso_read(bus) ? 1u : 0u));
+
+        if (last_bit) break;
+
+        /* Prepare next MOSI bit during the high phase. */
+        {
             uint64_t mosi_time = next_fall_time - setup_ticks;
             uint64_t now = bus_now_ticks(bus);
+
             if (tick_delta(now, mosi_time) < 0) {
                 wait_until_ticks(bus, mosi_time);
             }
-            mosi_write(bus, tx_bit_at(tx, bit_index + 1u));
+
+            mosi_write(bus, (tx & (uint8_t)(1u << (bit - 1))) != 0);
 
             now = bus_now_ticks(bus);
             if (tick_delta(now + setup_ticks, next_fall_time) > 0) {
                 next_fall_time = now + setup_ticks;
             }
-        }
 
-        wait_until_ticks(bus, next_fall_time);
-        fall_time = next_fall_time;
+            wait_until_ticks(bus, next_fall_time);
+            fall_time = next_fall_time;
+        }
     }
 
+    lens_clk_release(bus);
+    if (rx) *rx = in;
+    return 0;
+}
+
+/* The real function that transfers the bytes. */
+static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
+                                                  uint32_t period_ns,
+                                                  const uint8_t *tx,
+                                                  uint8_t *rx,
+                                                  size_t len) {
+    if (rx) memset(rx, 0, len);
+    if (len == 0) return 0;
+
+    /*
+     * Current PCB/debug rule: there is no Pi GPIO that senses the real
+     * lens-side DCLK_5V node. Therefore this code must NOT wait for
+     * lens_clk_read(), because that reads only the Pi-side drive GPIO.
+     *
+     * For the ready/alive init sequence we want to observe four frames:
+     *
+     *   byte 0: 0x0A  command/check
+     *           then wait 30 ms before clocking the first reply byte.
+     *           This is intentionally long for the first power-up/debug frame.
+     *
+     *   byte 1: 0x00  dummy/read byte, expected lens reply 0xAA
+     *           then wait 50 us before sending the next 0x0A.
+     *           Your scope showed the lens clock activity after this frame
+     *           takes about 33 us, so 50 us gives margin.
+     *
+     *   byte 2: 0x0A  second command/check
+     *           then wait 50 us before clocking the second reply byte.
+     *           This lets us see the fourth frame without waiting another 30 ms.
+     *
+     *   byte 3: 0x00  dummy/read byte, expected lens reply 0xAA
+     *
+     * For non-ready/alive transfers this function falls back to a conservative
+     * simple rule: after 0x0A wait 50 us, and before a following 0x0A after
+     * 0x00 wait 50 us. This is temporary until a real DCLK_5V sense pin exists.
+     */
+    const useconds_t first_after_0a_wait_us = 30000u;
+    const useconds_t normal_after_0a_wait_us = 50u;
+    const useconds_t after_00_before_0a_wait_us = 50u;
+
+    const bool is_ready_alive_4 =
+        tx && len == 4u && tx[0] == 0x0A && tx[1] == 0x00 &&
+        tx[2] == 0x0A && tx[3] == 0x00;
+
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t in = 0;
+        const uint8_t out = tx ? tx[i] : 0x00;
+
+        int rc = transfer_byte_mosi_mid_high_absolute(bus, period_ns, out, &in);
+        if (rc < 0) return rc;
+        if (rx) rx[i] = in;
+
+        if (i + 1u < len) {
+            const uint8_t next_out = tx ? tx[i + 1u] : 0x00;
+            useconds_t wait_us = 0;
+
+            lens_clk_release(bus);
+
+            if (is_ready_alive_4) {
+                if (i == 0u) {
+                    wait_us = first_after_0a_wait_us;      /* 0x0A -> first 0x00 */
+                } else if (i == 1u) {
+                    wait_us = after_00_before_0a_wait_us;  /* first 0x00 -> second 0x0A */
+                } else if (i == 2u) {
+                    wait_us = normal_after_0a_wait_us;     /* second 0x0A -> second 0x00 */
+                }
+            } else {
+                if (out == 0x0A) {
+                    wait_us = normal_after_0a_wait_us;
+                } else if (out == 0x00 && next_out == 0x0A) {
+                    wait_us = after_00_before_0a_wait_us;
+                }
+            }
+
+            if (wait_us > 0u) {
+                usleep(wait_us);
+            }
+        }
+    }
+
+    lens_clk_release(bus);
     return 0;
 }
 
@@ -483,11 +597,8 @@ int lens_bus_transfer_period(lens_bus_t *bus,
     if (!bus->gpio.regs) return -ENODEV;
 
     lens_clk_release(bus);
-    if (bus->cfg.wait_clk_high) {
-        int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
-        if (rc < 0) return rc;
-    }
 
+    /* No DCLK_5V sense pin exists on the current PCB, so do not wait here. */
     int rc;
     if (bus->cfg.legacy_mosi_after_fall) {
         rc = transfer_stream_legacy_after_fall(bus, period_ns, tx, rx, len);
