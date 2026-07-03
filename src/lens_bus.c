@@ -451,8 +451,8 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
      * For the ready/alive init sequence we want to observe four frames:
      *
      *   byte 0: 0x0A  command/check
-     *           then wait 30 ms before clocking the first reply byte.
-     *           This is intentionally long for the first power-up/debug frame.
+     *           then wait 50 us before clocking the first reply byte.
+     *           Scope measurements showed about 33 us for the lens CLK low/release cycle, so 50 us gives margin.
      *
      *   byte 1: 0x00  dummy/read byte, expected lens reply 0xAA
      *           then wait 50 us before sending the next 0x0A.
@@ -469,7 +469,7 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
      * simple rule: after 0x0A wait 50 us, and before a following 0x0A after
      * 0x00 wait 50 us. This is temporary until a real DCLK_5V sense pin exists.
      */
-    const useconds_t first_after_0a_wait_us = 30000u;
+    const useconds_t first_after_0a_wait_us = 50u;
     const useconds_t normal_after_0a_wait_us = 50u;
     const useconds_t after_00_before_0a_wait_us = 50u;
 
