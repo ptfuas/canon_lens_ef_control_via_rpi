@@ -1,7 +1,4 @@
 #define _GNU_SOURCE
-
-#define _POSIX_C_SOURCE 199309L
-
 #include "lens_bus.h"
 #include "lens_proto.h"
 
@@ -20,8 +17,6 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
-#include <time.h>
-
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -225,6 +220,7 @@ static int do_init(lens_bus_t *bus) {
     char name[64];
     uint8_t raw_name[18];
     uint8_t rx3[3];
+    uint8_t status = 0;
     uint8_t rx5[5];
     lens_aperture_info_t ai;
     uint16_t v;
@@ -234,10 +230,11 @@ static int do_init(lens_bus_t *bus) {
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
 
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 1800000L;  /* 1.8 ms */
-    nanosleep(&ts, NULL);
+    /* Pinefeat capture: first slow burst starts around 2.5023 s and
+     * the 9-byte basic-info burst starts around 2.5043 s. The low-level
+     * ready/alive transfer already includes the 50 us inter-frame gaps,
+     * so this delay places the next burst close to the observed timing. */
+    usleep(1800);
 
     printf("basic numeric lens info...\n");
     rc = lens_read_basic_info(bus, &bi);
@@ -246,19 +243,20 @@ static int do_init(lens_bus_t *bus) {
     printf("type=0x%02X lens_id=0x%02X max_focal=%u min_focal=%u c1=0x%02X c2=0x%02X\n",
            bi.type, bi.lens_id, bi.max_focal_length, bi.min_focal_length, bi.c1, bi.c2);
 
-    /* Stop here for the current scope test.
-     * The observed Pinefeat init sequence after ready/alive is this 9-byte
-     * slow basic-info exchange:
-     *   TX: 80 0A A4 03 00 00 00 00 00
-     *   RX: 00 81 3C 00 32 00 32 77 92
-     * Later fast init/name/status exchanges can be re-enabled once this is verified. */
-    return 0;
+    /* Pinefeat capture: the first 3-byte fast status burst starts around
+     * 2.50576 s. The 9-byte slow basic-info burst itself takes roughly
+     * 1.3 ms with the current 50 us inter-frame gaps, so only a short
+     * post-burst delay is required before starting the fast burst. */
+    usleep(150);
 
     printf("three fast dummy clocks from capture...\n");
     const uint8_t dummy3[3] = {0x00, 0x00, 0x00};
     rc = lens_bus_transfer(bus, LENS_SPEED_FAST, dummy3, rx3, sizeof(dummy3));
     if (rc < 0) return rc;
     print_bytes("RX:", rx3, sizeof(rx3));
+
+    /* Stop here for the current scope test. */
+    return 0;
 
     printf("lens name...\n");
     rc = lens_read_name(bus, name, sizeof(name), raw_name, sizeof(raw_name));
