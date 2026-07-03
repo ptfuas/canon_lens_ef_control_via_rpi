@@ -1,4 +1,7 @@
 #define _GNU_SOURCE
+
+#define _POSIX_C_SOURCE 199309L
+
 #include "lens_bus.h"
 #include "lens_proto.h"
 
@@ -17,6 +20,8 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <time.h>
+
 
 static volatile sig_atomic_t g_stop = 0;
 
@@ -228,6 +233,11 @@ static int do_init(lens_bus_t *bus) {
     rc = lens_ready_alive(bus, rx4);
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
+
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 1800000L;  /* 1.8 ms */
+    nanosleep(&ts, NULL);
 
     printf("basic numeric lens info...\n");
     rc = lens_read_basic_info(bus, &bi);
