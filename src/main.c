@@ -229,16 +229,20 @@ static int do_init(lens_bus_t *bus) {
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
 
-    return 0;
-
-
-
     printf("basic numeric lens info...\n");
     rc = lens_read_basic_info(bus, &bi);
     if (rc < 0) return rc;
     print_bytes("RAW:", bi.raw, sizeof(bi.raw));
     printf("type=0x%02X lens_id=0x%02X max_focal=%u min_focal=%u c1=0x%02X c2=0x%02X\n",
            bi.type, bi.lens_id, bi.max_focal_length, bi.min_focal_length, bi.c1, bi.c2);
+
+    /* Stop here for the current scope test.
+     * The observed Pinefeat init sequence after ready/alive is this 9-byte
+     * slow basic-info exchange:
+     *   TX: 80 0A A4 03 00 00 00 00 00
+     *   RX: 00 81 3C 00 32 00 32 77 92
+     * Later fast init/name/status exchanges can be re-enabled once this is verified. */
+    return 0;
 
     printf("three fast dummy clocks from capture...\n");
     const uint8_t dummy3[3] = {0x00, 0x00, 0x00};

@@ -448,34 +448,18 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
      * lens-side DCLK_5V node. Therefore this code must NOT wait for
      * lens_clk_read(), because that reads only the Pi-side drive GPIO.
      *
-     * For the ready/alive init sequence we want to observe four frames:
+     * The scope shows the lens may pull/release DCLK_5V for about 33 us after
+     * a slow byte. Until a real DCLK_5V sense pin is added, use a fixed 50 us
+     * inter-frame delay for slow transfers. This is now known to work for:
+     *   ready/alive: 0A 00 0A 00, with replies 00 AA 00 AA
+     * and is also used for the following 9-byte slow basic-info exchange:
+     *   TX: 80 0A A4 03 00 00 00 00 00
+     *   RX: 00 81 3C 00 32 00 32 77 92
      *
-     *   byte 0: 0x0A  command/check
-     *           then wait 50 us before clocking the first reply byte.
-     *           Scope measurements showed about 33 us for the lens CLK low/release cycle, so 50 us gives margin.
-     *
-     *   byte 1: 0x00  dummy/read byte, expected lens reply 0xAA
-     *           then wait 50 us before sending the next 0x0A.
-     *           Your scope showed the lens clock activity after this frame
-     *           takes about 33 us, so 50 us gives margin.
-     *
-     *   byte 2: 0x0A  second command/check
-     *           then wait 50 us before clocking the second reply byte.
-     *           This lets us see the fourth frame without waiting another 30 ms.
-     *
-     *   byte 3: 0x00  dummy/read byte, expected lens reply 0xAA
-     *
-     * For non-ready/alive transfers this function falls back to a conservative
-     * simple rule: after 0x0A wait 50 us, and before a following 0x0A after
-     * 0x00 wait 50 us. This is temporary until a real DCLK_5V sense pin exists.
+     * Fast transfers are left mostly unchanged for now.
      */
-    const useconds_t first_after_0a_wait_us = 50u;
-    const useconds_t normal_after_0a_wait_us = 50u;
-    const useconds_t after_00_before_0a_wait_us = 50u;
-
-    const bool is_ready_alive_4 =
-        tx && len == 4u && tx[0] == 0x0A && tx[1] == 0x00 &&
-        tx[2] == 0x0A && tx[3] == 0x00;
+    const useconds_t slow_inter_frame_wait_us = 50u;
+    const bool is_slow_period = (period_ns == bus->cfg.slow_period_ns);
 
     for (size_t i = 0; i < len; ++i) {
         uint8_t in = 0;
@@ -486,24 +470,21 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
         if (rx) rx[i] = in;
 
         if (i + 1u < len) {
-            const uint8_t next_out = tx ? tx[i + 1u] : 0x00;
             useconds_t wait_us = 0;
 
             lens_clk_release(bus);
 
-            if (is_ready_alive_4) {
-                if (i == 0u) {
-                    wait_us = first_after_0a_wait_us;      /* 0x0A -> first 0x00 */
-                } else if (i == 1u) {
-                    wait_us = after_00_before_0a_wait_us;  /* first 0x00 -> second 0x0A */
-                } else if (i == 2u) {
-                    wait_us = normal_after_0a_wait_us;     /* second 0x0A -> second 0x00 */
-                }
+            if (is_slow_period) {
+                /* Every slow byte is treated as a separate EF frame. */
+                wait_us = slow_inter_frame_wait_us;
             } else {
+                /* Temporary conservative rule for fast/raw transfers until
+                 * a real DCLK_5V sense pin exists. */
+                const uint8_t next_out = tx ? tx[i + 1u] : 0x00;
                 if (out == 0x0A) {
-                    wait_us = normal_after_0a_wait_us;
+                    wait_us = slow_inter_frame_wait_us;
                 } else if (out == 0x00 && next_out == 0x0A) {
-                    wait_us = after_00_before_0a_wait_us;
+                    wait_us = slow_inter_frame_wait_us;
                 }
             }
 
