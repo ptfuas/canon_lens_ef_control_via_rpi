@@ -1,13 +1,29 @@
+#define _POSIX_C_SOURCE 199309L
+
+
 #include "lens_proto.h"
 
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <time.h>
+
 
 int lens_ready_alive(lens_bus_t *bus, uint8_t rx[4]) {
     const uint8_t tx[4] = {0x0A, 0x00, 0x0A, 0x00};
-    return lens_bus_transfer(bus, LENS_SPEED_SLOW, tx, rx, sizeof(tx));
+
+    int rc = lens_bus_transfer(bus, LENS_SPEED_SLOW, tx, rx, sizeof(tx));
+    if (rc < 0) return rc;
+
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 1800000L;  /* 1.8 ms */
+    nanosleep(&ts, NULL);
+
+    lens_basic_info_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    return lens_read_basic_info(bus, &tmp);
 }
 
 int lens_read_basic_info(lens_bus_t *bus, lens_basic_info_t *info) {
