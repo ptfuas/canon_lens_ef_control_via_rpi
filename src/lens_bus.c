@@ -444,22 +444,26 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
     if (len == 0) return 0;
 
     /*
-     * Current PCB/debug rule: there is no Pi GPIO that senses the real
-     * lens-side DCLK_5V node. Therefore this code must NOT wait for
-     * lens_clk_read(), because that reads only the Pi-side drive GPIO.
+     * Current PCB has no Pi GPIO that senses the real lens-side DCLK_5V node.
+     * Therefore this code must not wait on lens_clk_read() between frames.
      *
-     * The scope shows the lens may pull/release DCLK_5V for about 33 us after
-     * a slow byte. Until a real DCLK_5V sense pin is added, use a fixed 50 us
-     * inter-frame delay for slow transfers. This is now known to work for:
-     *   ready/alive: 0A 00 0A 00, with replies 00 AA 00 AA
-     * and is also used for the following 9-byte slow basic-info exchange:
-     *   TX: 80 0A A4 03 00 00 00 00 00
-     *   RX: 00 81 3C 00 32 00 32 77 92
+     * Treat every byte as one EF "frame" of 8 clocks:
      *
-     * Fast transfers are left mostly unchanged for now.
+     *   slow frame clock: ~77.91 kHz, delay 50 us between frames
+     *   fast frame clock: ~500 kHz, delay 130 us between frames
+     *
+     * The 130 us fast delay comes from your PineFeat capture / logic analyzer,
+     * where the fast frame period is about 115-130 us from frame start to
+     * frame start. With no DCLK_5V sense pin, fixed timing is the safest
+     * approximation.
      */
     const useconds_t slow_inter_frame_wait_us = 50u;
-    const bool is_slow_period = (period_ns == bus->cfg.slow_period_ns);
+    const useconds_t fast_inter_frame_wait_us = 130u;
+
+    const bool is_fast_period = (period_ns == bus->cfg.fast_period_ns);
+
+    const useconds_t inter_frame_wait_us =
+        is_fast_period ? fast_inter_frame_wait_us : slow_inter_frame_wait_us;
 
     for (size_t i = 0; i < len; ++i) {
         uint8_t in = 0;
@@ -467,30 +471,12 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
 
         int rc = transfer_byte_mosi_mid_high_absolute(bus, period_ns, out, &in);
         if (rc < 0) return rc;
+
         if (rx) rx[i] = in;
 
         if (i + 1u < len) {
-            useconds_t wait_us = 0;
-
             lens_clk_release(bus);
-
-            if (is_slow_period) {
-                /* Every slow byte is treated as a separate EF frame. */
-                wait_us = slow_inter_frame_wait_us;
-            } else {
-                /* Temporary conservative rule for fast/raw transfers until
-                 * a real DCLK_5V sense pin exists. */
-                const uint8_t next_out = tx ? tx[i + 1u] : 0x00;
-                if (out == 0x0A) {
-                    wait_us = slow_inter_frame_wait_us;
-                } else if (out == 0x00 && next_out == 0x0A) {
-                    wait_us = slow_inter_frame_wait_us;
-                }
-            }
-
-            if (wait_us > 0u) {
-                usleep(wait_us);
-            }
+            usleep(inter_frame_wait_us);
         }
     }
 
