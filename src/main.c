@@ -247,8 +247,8 @@ static int do_init(lens_bus_t *bus) {
     usleep(150);
 
     printf("first fast 3-frame burst from capture...\n");
-    const uint8_t fast3[3] = {0x00, 0x00, 0x00};
-    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, fast3, rx3, sizeof(fast3));
+    const uint8_t first_fast_burst[3] = {0x00, 0x00, 0x00};
+    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, first_fast_burst, rx3, sizeof(first_fast_burst));
     if (rc < 0) return rc;
     print_bytes("RX:", rx3, sizeof(rx3));
 
@@ -264,6 +264,25 @@ static int do_init(lens_bus_t *bus) {
     if (rc < 0) return rc;
     print_bytes("RAW:", raw_name, sizeof(raw_name));
     printf("name='%s'\n", name);
+
+/* Pinefeat capture timing:
+     *   lens-name burst starts around 2.50625 s
+     *   focus-position burst starts around 2.50935 s
+     *
+     * Delta ≈ 3.10 ms.
+     */
+    usleep(3100);
+
+    printf("current focus position...\n");
+
+    uint16_t focus_pos;
+    uint8_t raw_focus[3];
+
+    rc = lens_read_focus_position(bus, &focus_pos, raw_focus);
+    if (rc < 0) return rc;
+
+    print_bytes("RAW:", raw_focus, sizeof(raw_focus));
+    printf("focus position = %u (0x%04X)\n", focus_pos, focus_pos);
 
     return 0;
 }
