@@ -220,20 +220,16 @@ static int do_init(lens_bus_t *bus) {
     char name[64];
     uint8_t raw_name[18];
     uint8_t rx3[3];
-    uint8_t status = 0;
-    uint8_t rx5[5];
-    lens_aperture_info_t ai;
-    uint16_t v;
 
     printf("ready/alive slow sequence...\n");
     rc = lens_ready_alive(bus, rx4);
     if (rc < 0) return rc;
     print_bytes("RX:", rx4, sizeof(rx4));
 
-    /* Pinefeat capture: first slow burst starts around 2.5023 s and
-     * the 9-byte basic-info burst starts around 2.5043 s. The low-level
-     * ready/alive transfer already includes the 50 us inter-frame gaps,
-     * so this delay places the next burst close to the observed timing. */
+    /* Pinefeat capture timing:
+     *   ready/alive burst starts around 2.5023 s
+     *   basic-info burst starts around 2.5043 s
+     * Keep this as an explicit init-sequence delay, not hidden in lens_proto.c. */
     usleep(1800);
 
     printf("basic numeric lens info...\n");
@@ -243,57 +239,31 @@ static int do_init(lens_bus_t *bus) {
     printf("type=0x%02X lens_id=0x%02X max_focal=%u min_focal=%u c1=0x%02X c2=0x%02X\n",
            bi.type, bi.lens_id, bi.max_focal_length, bi.min_focal_length, bi.c1, bi.c2);
 
-    /* Pinefeat capture: the first 3-byte fast status burst starts around
-     * 2.50576 s. The 9-byte slow basic-info burst itself takes roughly
-     * 1.3 ms with the current 50 us inter-frame gaps, so only a short
-     * post-burst delay is required before starting the fast burst. */
+    /* Pinefeat capture timing:
+     *   basic-info burst starts around 2.5043 s
+     *   first fast 3-frame burst starts around 2.50576 s
+     * Because the 9 slow frames themselves take most of that interval, the
+     * post-burst wait is short. Keep it conservative for the current no-CLK-sense PCB. */
     usleep(150);
 
-    printf("three fast dummy clocks from capture...\n");
-    const uint8_t dummy3[3] = {0x00, 0x00, 0x00};
-    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, dummy3, rx3, sizeof(dummy3));
+    printf("first fast 3-frame burst from capture...\n");
+    const uint8_t fast3[3] = {0x00, 0x00, 0x00};
+    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, fast3, rx3, sizeof(fast3));
     if (rc < 0) return rc;
     print_bytes("RX:", rx3, sizeof(rx3));
 
-    /* Stop here for the current scope test. */
-    return 0;
+    /* Pinefeat capture timing:
+     *   first fast burst starts around 2.50576 s
+     *   lens-name burst starts around 2.50625 s
+     * The 3 fast frames plus 130 us inter-frame gaps account for most of this,
+     * so use about 180 us after the burst before asking the name. */
+    usleep(180);
 
     printf("lens name...\n");
     rc = lens_read_name(bus, name, sizeof(name), raw_name, sizeof(raw_name));
     if (rc < 0) return rc;
     print_bytes("RAW:", raw_name, sizeof(raw_name));
     printf("name='%s'\n", name);
-
-    printf("focus position...\n");
-    rc = lens_read_focus_position(bus, &v, rx3);
-    if (rc < 0) return rc;
-    print_bytes("RX:", rx3, sizeof(rx3));
-    printf("focus_raw=%u / 0x%04X\n", v, v);
-
-    printf("C2 unknown 4-byte reply...\n");
-    rc = lens_read_c2_unknown(bus, rx5);
-    if (rc < 0) return rc;
-    print_bytes("RX:", rx5, sizeof(rx5));
-
-    printf("focal length...\n");
-    rc = lens_read_focal_length(bus, &v, rx3);
-    if (rc < 0) return rc;
-    print_bytes("RX:", rx3, sizeof(rx3));
-    printf("focal_length=%u\n", v);
-
-    printf("aperture info...\n");
-    rc = lens_read_aperture_info(bus, &ai);
-    if (rc < 0) return rc;
-    print_bytes("RX:", ai.raw, sizeof(ai.raw));
-    printf("aperture raw max/current/min = 0x%02X 0x%02X 0x%02X\n",
-           ai.max_aperture, ai.current_aperture, ai.min_aperture);
-
-    printf("captured 0x50 0x6E tail...\n");
-    const uint8_t tail[2] = {0x50, 0x6E};
-    uint8_t tail_rx[2];
-    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, tail, tail_rx, sizeof(tail));
-    if (rc < 0) return rc;
-    print_bytes("RX:", tail_rx, sizeof(tail_rx));
 
     return 0;
 }

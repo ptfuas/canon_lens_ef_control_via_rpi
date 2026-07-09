@@ -434,6 +434,93 @@ static int transfer_byte_mosi_mid_high_absolute(lens_bus_t *bus,
     return 0;
 }
 
+
+/* Fast-mode variant: DCL/MOSI is stable at each CLK rising edge.
+ *
+ * Fast EF frames are sampled by the lens on the CLK rising edge. Therefore
+ * this variant changes DCL during the CLK-low phase, before the corresponding
+ * rising edge. This makes DCL stable at every positive edge of CLK.
+ *
+ * For example, TX 0x82 = 10000010 should show DCL high at rising edge #1
+ * and rising edge #7, and low at the other rising edges.
+ *
+ * MISO/DLC is still sampled on/just after the rising edge.
+ */
+static int transfer_byte_fast_mosi_stable_at_rise_absolute(lens_bus_t *bus,
+                                                           uint32_t period_ns,
+                                                           uint8_t tx,
+                                                           uint8_t *rx) {
+    const uint32_t correction_factor = (uint32_t)((uint64_t)period_ns * 8u / 100u);
+    const uint32_t low_ns  = (period_ns - correction_factor) / 2u;
+
+    const uint64_t period_ticks = bus_ns_to_ticks(bus, period_ns);
+    const uint64_t low_ticks    = bus_ns_to_ticks(bus, low_ns);
+    const uint64_t sample_ticks = bus_ns_to_ticks(bus, bus->cfg.sample_delay_ns);
+
+    /* Change DCL shortly after the falling edge, while CLK is still low,
+     * so it is stable before the rising edge. Keep this comfortably smaller
+     * than the low phase. */
+    uint32_t mosi_after_fall_ns = 200u;
+    if (mosi_after_fall_ns > low_ns / 2u) {
+        mosi_after_fall_ns = low_ns / 2u;
+    }
+    const uint64_t mosi_after_fall_ticks = bus_ns_to_ticks(bus, mosi_after_fall_ns);
+
+    uint8_t in = 0;
+
+    lens_clk_release(bus);
+    if (bus->cfg.wait_clk_high) {
+        int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
+        if (rc < 0) return rc;
+    }
+
+    /* Bit 7 has no preceding low phase in this frame, so prepare it before
+     * the first falling edge. */
+    mosi_write(bus, (tx & 0x80u) != 0);
+
+    uint64_t fall_time = bus_now_ticks(bus) + bus_ns_to_ticks(bus, 300u);
+    wait_until_ticks(bus, fall_time);
+
+    for (int bit = 7; bit >= 0; --bit) {
+        const bool last_bit = (bit == 0);
+        const uint64_t rise_release_time = fall_time + low_ticks;
+        const uint64_t next_fall_time = fall_time + period_ticks;
+
+        lens_clk_drive_low(bus);
+
+        /* For bits 6..0, update DCL during the low phase of this bit,
+         * before releasing CLK high. This is the key difference from the
+         * earlier experimental "after rising edge" version. */
+        if (bit != 7) {
+            wait_until_ticks(bus, fall_time + mosi_after_fall_ticks);
+            mosi_write(bus, (tx & (uint8_t)(1u << bit)) != 0);
+        }
+
+        wait_until_ticks(bus, rise_release_time);
+        lens_clk_release(bus);
+
+        if (bus->cfg.wait_clk_high) {
+            int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
+            if (rc < 0) return rc;
+        }
+
+        if (sample_ticks) {
+            wait_until_ticks(bus, bus_now_ticks(bus) + sample_ticks);
+        }
+
+        in = (uint8_t)((in << 1) | (miso_read(bus) ? 1u : 0u));
+
+        if (last_bit) break;
+
+        wait_until_ticks(bus, next_fall_time);
+        fall_time = next_fall_time;
+    }
+
+    lens_clk_release(bus);
+    if (rx) *rx = in;
+    return 0;
+}
+
 /* The real function that transfers the bytes. */
 static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
                                                   uint32_t period_ns,
@@ -444,39 +531,55 @@ static int transfer_stream_mosi_mid_high_absolute(lens_bus_t *bus,
     if (len == 0) return 0;
 
     /*
-     * Current PCB has no Pi GPIO that senses the real lens-side DCLK_5V node.
-     * Therefore this code must not wait on lens_clk_read() between frames.
+     * Current PCB/debug rule: there is no Pi GPIO that senses the real
+     * lens-side DCLK_5V node. Therefore this code must NOT wait for
+     * lens_clk_read(), because that reads only the Pi-side drive GPIO.
      *
-     * Treat every byte as one EF "frame" of 8 clocks:
+     * The scope shows the lens may pull/release DCLK_5V for about 33 us after
+     * a slow byte. Until a real DCLK_5V sense pin is added, use a fixed 50 us
+     * inter-frame delay for slow transfers. This is now known to work for:
+     *   ready/alive: 0A 00 0A 00, with replies 00 AA 00 AA
+     * and is also used for the following 9-byte slow basic-info exchange:
+     *   TX: 80 0A A4 03 00 00 00 00 00
+     *   RX: 00 81 3C 00 32 00 32 77 92
      *
-     *   slow frame clock: ~77.91 kHz, delay 50 us between frames
-     *   fast frame clock: ~500 kHz, delay 130 us between frames
-     *
-     * The 130 us fast delay comes from your PineFeat capture / logic analyzer,
-     * where the fast frame period is about 115-130 us from frame start to
-     * frame start. With no DCLK_5V sense pin, fixed timing is the safest
-     * approximation.
+     * Fast transfers are left mostly unchanged for now.
      */
     const useconds_t slow_inter_frame_wait_us = 50u;
     const useconds_t fast_inter_frame_wait_us = 130u;
-
-    const bool is_fast_period = (period_ns == bus->cfg.fast_period_ns);
-
-    const useconds_t inter_frame_wait_us =
-        is_fast_period ? fast_inter_frame_wait_us : slow_inter_frame_wait_us;
+    const bool is_slow_period = (period_ns == bus->cfg.slow_period_ns);
 
     for (size_t i = 0; i < len; ++i) {
         uint8_t in = 0;
         const uint8_t out = tx ? tx[i] : 0x00;
 
-        int rc = transfer_byte_mosi_mid_high_absolute(bus, period_ns, out, &in);
+        int rc;
+        if (is_slow_period) {
+            rc = transfer_byte_mosi_mid_high_absolute(bus, period_ns, out, &in);
+        } else {
+            rc = transfer_byte_fast_mosi_stable_at_rise_absolute(bus, period_ns, out, &in);
+        }
         if (rc < 0) return rc;
-
         if (rx) rx[i] = in;
 
         if (i + 1u < len) {
+            useconds_t wait_us = 0;
+
             lens_clk_release(bus);
-            usleep(inter_frame_wait_us);
+
+            if (is_slow_period) {
+                /* Every slow byte is treated as a separate EF frame. */
+                wait_us = slow_inter_frame_wait_us;
+            } else {
+                /* Pinefeat fast frames are also separated frames, not one
+                 * continuous 24/144-clock burst. Logic-analyzer captures show
+                 * roughly 115-130 us between fast frame starts; use 130 us. */
+                wait_us = fast_inter_frame_wait_us;
+            }
+
+            if (wait_us > 0u) {
+                usleep(wait_us);
+            }
         }
     }
 
