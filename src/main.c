@@ -284,6 +284,49 @@ static int do_init(lens_bus_t *bus) {
     print_bytes("RAW:", raw_focus, sizeof(raw_focus));
     printf("focus position = %u (0x%04X)\n", focus_pos, focus_pos);
 
+    usleep(500);
+
+    printf("C2 unknown...\n");
+    uint8_t raw_c2[5];
+    rc = lens_read_c2_unknown(bus, raw_c2);
+    if (rc < 0) return rc;
+    print_bytes("RAW:", raw_c2, sizeof(raw_c2));
+
+    usleep(830);
+
+    printf("focal length...\n");
+    uint16_t focal_length;
+    uint8_t raw_focal[3];
+    rc = lens_read_focal_length(bus, &focal_length, raw_focal);
+    if (rc < 0) return rc;
+    print_bytes("RAW:", raw_focal, sizeof(raw_focal));
+    printf("focal_length = %u\n", focal_length);
+
+    usleep(510);
+
+    printf("aperture info...\n");
+    lens_aperture_info_t ap;
+    rc = lens_read_aperture_info(bus, &ap);
+    if (rc < 0) return rc;
+    print_bytes("RAW:", ap.raw, sizeof(ap.raw));
+    printf("max_ap=0x%02X current_ap=0x%02X min_ap=0x%02X\n",
+           ap.max_aperture,
+           ap.current_aperture,
+           ap.min_aperture);
+
+    usleep(2360);
+
+    printf("fast 2-frame command 0x50 0x6E...\n");
+
+    const uint8_t tx_50_6e[2] = {0x50, 0x6E};
+    uint8_t rx_50_6e[2];
+
+    rc = lens_bus_transfer(bus, LENS_SPEED_FAST, tx_50_6e, rx_50_6e, sizeof(tx_50_6e));
+    if (rc < 0) return rc;
+
+    print_bytes("TX:", tx_50_6e, sizeof(tx_50_6e));
+    print_bytes("RX:", rx_50_6e, sizeof(rx_50_6e));
+
     return 0;
 }
 
