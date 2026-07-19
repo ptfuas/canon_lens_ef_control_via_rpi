@@ -1,5 +1,5 @@
 CC ?= gcc
-CFLAGS ?= -g -O0 -std=c11 -Wall -Wextra -Wpedantic
+CFLAGS ?= -O2 -march=armv8-a -mtune=cortex-a53 -std=c11 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
 LDLIBS ?=
 
