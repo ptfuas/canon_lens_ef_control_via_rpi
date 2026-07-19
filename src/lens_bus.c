@@ -365,8 +365,8 @@ static int transfer_byte_mosi_mid_high_absolute(lens_bus_t *bus,
     if (setup_before_fall_ns == 0) setup_before_fall_ns = high_ns / 2u;
     if (setup_before_fall_ns > high_ns) setup_before_fall_ns = high_ns;
 
-    const uint64_t period_ticks = bus_ns_to_ticks(bus, period_ns);
     const uint64_t low_ticks    = bus_ns_to_ticks(bus, low_ns);
+    const uint64_t high_ticks   = bus_ns_to_ticks(bus, high_ns);
     const uint64_t setup_ticks  = bus_ns_to_ticks(bus, setup_before_fall_ns);
     const uint64_t sample_ticks = bus_ns_to_ticks(bus, bus->cfg.sample_delay_ns);
 
@@ -380,20 +380,20 @@ static int transfer_byte_mosi_mid_high_absolute(lens_bus_t *bus,
     }
 
     mosi_write(bus, (tx & 0x80u) != 0);
-
-    uint64_t fall_time = bus_now_ticks(bus) + setup_ticks;
-    wait_until_ticks(bus, fall_time);
+    wait_until_ticks(bus, bus_now_ticks(bus) + setup_ticks);
 
     for (int bit = 7; bit >= 0; --bit) {
         const bool last_bit = (bit == 0);
-        const uint64_t rise_release_time = fall_time + low_ticks;
-        uint64_t next_fall_time = fall_time + period_ticks;
 
-        /* Falling edge for this bit. MOSI is already stable. */
+        /* Never "catch up" by collapsing a phase. Each physical low phase
+         * starts from the instant CLK is actually driven low. If Linux delays
+         * us, that phase may become longer, but it is never omitted. */
         lens_clk_drive_low(bus);
+        const uint64_t low_start = bus_now_ticks(bus);
+        wait_until_ticks(bus, low_start + low_ticks);
 
-        wait_until_ticks(bus, rise_release_time);
         lens_clk_release(bus);
+        const uint64_t rise_time = bus_now_ticks(bus);
 
         if (bus->cfg.wait_clk_high) {
             int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
@@ -401,32 +401,31 @@ static int transfer_byte_mosi_mid_high_absolute(lens_bus_t *bus,
         }
 
         if (sample_ticks) {
-            wait_until_ticks(bus, bus_now_ticks(bus) + sample_ticks);
+            wait_until_ticks(bus, rise_time + sample_ticks);
         }
 
         in = (uint8_t)((in << 1) | (miso_read(bus) ? 1u : 0u));
 
         if (last_bit) break;
 
-        /* Prepare next MOSI bit during the high phase. */
-        {
-            uint64_t mosi_time = next_fall_time - setup_ticks;
-            uint64_t now = bus_now_ticks(bus);
+        /* Change the next MOSI bit during the actual high phase. Preserve both
+         * the intended high duration and the requested MOSI setup time. */
+        uint64_t next_fall_time = rise_time + high_ticks;
+        uint64_t mosi_time = next_fall_time - setup_ticks;
+        uint64_t now = bus_now_ticks(bus);
 
-            if (tick_delta(now, mosi_time) < 0) {
-                wait_until_ticks(bus, mosi_time);
-            }
-
-            mosi_write(bus, (tx & (uint8_t)(1u << (bit - 1))) != 0);
-
-            now = bus_now_ticks(bus);
-            if (tick_delta(now + setup_ticks, next_fall_time) > 0) {
-                next_fall_time = now + setup_ticks;
-            }
-
-            wait_until_ticks(bus, next_fall_time);
-            fall_time = next_fall_time;
+        if (tick_delta(now, mosi_time) < 0) {
+            wait_until_ticks(bus, mosi_time);
         }
+
+        mosi_write(bus, (tx & (uint8_t)(1u << (bit - 1))) != 0);
+
+        now = bus_now_ticks(bus);
+        if (tick_delta(now + setup_ticks, next_fall_time) > 0) {
+            next_fall_time = now + setup_ticks;
+        }
+
+        wait_until_ticks(bus, next_fall_time);
     }
 
     lens_clk_release(bus);
@@ -452,14 +451,14 @@ static int transfer_byte_fast_mosi_stable_at_rise_absolute(lens_bus_t *bus,
                                                            uint8_t *rx) {
     const uint32_t correction_factor = (uint32_t)((uint64_t)period_ns * 8u / 100u);
     const uint32_t low_ns  = (period_ns - correction_factor) / 2u;
+    const uint32_t high_ns = period_ns - low_ns;
 
-    const uint64_t period_ticks = bus_ns_to_ticks(bus, period_ns);
     const uint64_t low_ticks    = bus_ns_to_ticks(bus, low_ns);
+    const uint64_t high_ticks   = bus_ns_to_ticks(bus, high_ns);
     const uint64_t sample_ticks = bus_ns_to_ticks(bus, bus->cfg.sample_delay_ns);
 
-    /* Change DCL shortly after the falling edge, while CLK is still low,
-     * so it is stable before the rising edge. Keep this comfortably smaller
-     * than the low phase. */
+    /* Change DCL shortly after the falling edge, while CLK is still low, so
+     * it is stable before the rising edge. */
     uint32_t mosi_after_fall_ns = 200u;
     if (mosi_after_fall_ns > low_ns / 2u) {
         mosi_after_fall_ns = low_ns / 2u;
@@ -474,30 +473,27 @@ static int transfer_byte_fast_mosi_stable_at_rise_absolute(lens_bus_t *bus,
         if (rc < 0) return rc;
     }
 
-    /* Bit 7 has no preceding low phase in this frame, so prepare it before
-     * the first falling edge. */
+    /* Bit 7 has no preceding low phase in this frame. */
     mosi_write(bus, (tx & 0x80u) != 0);
-
-    uint64_t fall_time = bus_now_ticks(bus) + bus_ns_to_ticks(bus, 300u);
-    wait_until_ticks(bus, fall_time);
+    wait_until_ticks(bus, bus_now_ticks(bus) + bus_ns_to_ticks(bus, 300u));
 
     for (int bit = 7; bit >= 0; --bit) {
         const bool last_bit = (bit == 0);
-        const uint64_t rise_release_time = fall_time + low_ticks;
-        const uint64_t next_fall_time = fall_time + period_ticks;
 
+        /* Generate every physical pulse. Deadlines are rebased on the edge
+         * that was actually produced, so being late can stretch a phase but
+         * can never make the following high or low phase disappear. */
         lens_clk_drive_low(bus);
+        const uint64_t low_start = bus_now_ticks(bus);
 
-        /* For bits 6..0, update DCL during the low phase of this bit,
-         * before releasing CLK high. This is the key difference from the
-         * earlier experimental "after rising edge" version. */
         if (bit != 7) {
-            wait_until_ticks(bus, fall_time + mosi_after_fall_ticks);
+            wait_until_ticks(bus, low_start + mosi_after_fall_ticks);
             mosi_write(bus, (tx & (uint8_t)(1u << bit)) != 0);
         }
 
-        wait_until_ticks(bus, rise_release_time);
+        wait_until_ticks(bus, low_start + low_ticks);
         lens_clk_release(bus);
+        const uint64_t rise_time = bus_now_ticks(bus);
 
         if (bus->cfg.wait_clk_high) {
             int rc = lens_wait_clk_high(bus, bus->cfg.clk_high_timeout_us);
@@ -505,15 +501,15 @@ static int transfer_byte_fast_mosi_stable_at_rise_absolute(lens_bus_t *bus,
         }
 
         if (sample_ticks) {
-            wait_until_ticks(bus, bus_now_ticks(bus) + sample_ticks);
+            wait_until_ticks(bus, rise_time + sample_ticks);
         }
 
         in = (uint8_t)((in << 1) | (miso_read(bus) ? 1u : 0u));
 
         if (last_bit) break;
 
-        wait_until_ticks(bus, next_fall_time);
-        fall_time = next_fall_time;
+        /* Guarantee a complete high phase before the next falling edge. */
+        wait_until_ticks(bus, rise_time + high_ticks);
     }
 
     lens_clk_release(bus);
