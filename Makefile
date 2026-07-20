@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -march=armv8-a -mtune=cortex-a53 -std=c11 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
 LDLIBS ?=
 
-SRC = src/main.c src/gpio_rpi.c src/lens_bus.c src/lens_proto.c
+SRC = src/main.c src/gpio_rpi.c src/lens_bus.c src/lens_proto.c src/lens_power.c
 OBJ = $(SRC:.c=.o)
 BIN = lensctl
 

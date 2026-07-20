@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "lens_bus.h"
 #include "lens_proto.h"
+#include "lens_power.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -19,10 +20,17 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t g_stop = 0;
+static lens_power_t *g_signal_power = NULL;
 
 static void on_signal(int sig) {
     (void)sig;
     g_stop = 1;
+
+    /* rpi_gpio_write() is only a direct MMIO store plus a compiler barrier.
+     * Turn both TPS22968 enables off immediately on SIGINT/SIGTERM. */
+    if (g_signal_power) {
+        lens_power_all_off(g_signal_power);
+    }
 }
 
 static void usage(FILE *f) {
@@ -33,6 +41,8 @@ static void usage(FILE *f) {
         "  MOSI/DCL GPIO17  physical pin 11\n"
         "  MISO/DLC GPIO27  physical pin 13\n"
         "  CLK      GPIO22  physical pin 15, open-drain by direction switching\n"
+        "  EN_VBUS  GPIO23  physical pin 16, lens electronics supply\n"
+        "  EN_VBAT  GPIO24  physical pin 18, lens motor supply (kept OFF for now)\n"
         "\n"
         "Usage:\n"
         "  lensctl [options] <command> [args...]\n"
@@ -41,6 +51,8 @@ static void usage(FILE *f) {
         "  --mosi N              BCM GPIO for DCL/MOSI, default 17\n"
         "  --miso N              BCM GPIO for DLC/MISO, default 27\n"
         "  --clk N               BCM GPIO for CLK, default 22\n"
+        "  --en-vbus N           BCM GPIO for EN_VBUS, default 23\n"
+        "  --en-vbat N           BCM GPIO for EN_VBAT, default 24\n"
         "  --slow-ns N           slow full clock period, default 12835 ns = 77.91 kHz\n"
         "  --fast-ns N           fast full clock period, default 2000 ns = 500 kHz\n"
         "  --slow-hz HZ          set slow period from frequency, e.g. 77910\n"
@@ -334,6 +346,8 @@ int main(int argc, char **argv) {
     lens_bus_config_t cfg;
     lens_bus_default_config(&cfg);
     bool want_rt = true;
+    unsigned en_vbus_gpio = LENS_POWER_DEFAULT_EN_VBUS_GPIO;
+    unsigned en_vbat_gpio = LENS_POWER_DEFAULT_EN_VBAT_GPIO;
 
     int argi = 1;
     while (argi < argc) {
@@ -347,6 +361,10 @@ int main(int argc, char **argv) {
             uint32_t v; if (parse_u32(argv[++argi], &v) < 0) goto badopt; cfg.miso_gpio = v;
         } else if (strcmp(a, "--clk") == 0 && argi + 1 < argc) {
             uint32_t v; if (parse_u32(argv[++argi], &v) < 0) goto badopt; cfg.clk_gpio = v;
+        } else if (strcmp(a, "--en-vbus") == 0 && argi + 1 < argc) {
+            uint32_t v; if (parse_u32(argv[++argi], &v) < 0) goto badopt; en_vbus_gpio = v;
+        } else if (strcmp(a, "--en-vbat") == 0 && argi + 1 < argc) {
+            uint32_t v; if (parse_u32(argv[++argi], &v) < 0) goto badopt; en_vbat_gpio = v;
         } else if (strcmp(a, "--slow-ns") == 0 && argi + 1 < argc) {
             if (parse_u32(argv[++argi], &cfg.slow_period_ns) < 0) goto badopt;
         } else if (strcmp(a, "--fast-ns") == 0 && argi + 1 < argc) {
@@ -388,12 +406,44 @@ int main(int argc, char **argv) {
 
     if (want_rt) (void)enable_realtime();
 
+    if (en_vbus_gpio == en_vbat_gpio ||
+        en_vbus_gpio == cfg.mosi_gpio || en_vbus_gpio == cfg.miso_gpio || en_vbus_gpio == cfg.clk_gpio ||
+        en_vbat_gpio == cfg.mosi_gpio || en_vbat_gpio == cfg.miso_gpio || en_vbat_gpio == cfg.clk_gpio) {
+        fprintf(stderr, "power-enable GPIOs must be distinct from each other and from DCL/DLC/DCLK\n");
+        return 2;
+    }
+
     lens_bus_t bus;
-    int rc = lens_bus_open(&bus, &cfg); // configures clk pin with weak pull and input, MISO as input and set MOSI as 0 and output 
+    int rc = lens_bus_open(&bus, &cfg); // configures clk pin with weak pull and input, MISO as input and set MOSI as 0 and output
     if (rc < 0) {
         fprintf(stderr, "lens_bus_open failed: %s (%d)\n", lens_strerror(rc), rc);
         return 1;
     }
+
+    lens_power_t power;
+    rc = lens_power_init(&power, &bus.gpio, en_vbus_gpio, en_vbat_gpio);
+    if (rc < 0) {
+        fprintf(stderr, "lens_power_init failed: %s (%d)\n", strerror(-rc), rc);
+        lens_bus_close(&bus);
+        return 1;
+    }
+
+    /* Install shutdown handling before enabling either TPS22968 channel. */
+    struct sigaction power_sa;
+    memset(&power_sa, 0, sizeof(power_sa));
+    power_sa.sa_handler = on_signal;
+    sigemptyset(&power_sa.sa_mask);
+    sigaction(SIGINT, &power_sa, NULL);
+    sigaction(SIGTERM, &power_sa, NULL);
+    g_signal_power = &power;
+
+    /* Current startup policy:
+     *   EN_VBUS = ON  -> power lens electronics and EF interface
+     *   EN_VBAT = OFF -> reserve motor supply for later implementation
+     */
+    lens_power_set_vbat(&power, false);
+    lens_power_set_vbus(&power, true);
+    usleep(20000); /* Allow the lens electronics supply to settle before EF traffic. */
 
     if (strcmp(cmd, "ready") == 0) {
         uint8_t rx[4];
@@ -482,10 +532,14 @@ int main(int argc, char **argv) {
 
     if (rc < 0) {
         fprintf(stderr, "command failed: %s (%d)\n", lens_strerror(rc), rc);
+        lens_power_all_off(&power);
+        g_signal_power = NULL;
         lens_bus_close(&bus);
         return 1;
     }
 
+    lens_power_all_off(&power);
+    g_signal_power = NULL;
     lens_bus_close(&bus);
     return 0;
 
