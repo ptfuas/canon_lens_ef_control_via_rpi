@@ -42,7 +42,7 @@ static void usage(FILE *f) {
         "  MISO/DLC GPIO27  physical pin 13\n"
         "  CLK      GPIO22  physical pin 15, open-drain by direction switching\n"
         "  EN_VBUS  GPIO23  physical pin 16, lens electronics supply\n"
-        "  EN_VBAT  GPIO24  physical pin 18, lens motor supply (kept OFF for now)\n"
+        "  EN_VBAT  GPIO24  physical pin 18, lens motor supply\n"
         "\n"
         "Usage:\n"
         "  lensctl [options] <command> [args...]\n"
@@ -438,12 +438,15 @@ int main(int argc, char **argv) {
     g_signal_power = &power;
 
     /* Current startup policy:
-     *   EN_VBUS = ON  -> power lens electronics and EF interface
-     *   EN_VBAT = OFF -> reserve motor supply for later implementation
+     *   EN_VBUS = OFF -> lens electronics are powered directly from the Raspberry Pi
+     *   EN_VBAT = OFF -> motor supply remains disabled throughout initialization
+     *
+     * For the "init" command, EN_VBAT is enabled only after do_init() completes,
+     * immediately before sending the aperture movement command.
      */
+    lens_power_set_vbus(&power, false);
     lens_power_set_vbat(&power, false);
-    lens_power_set_vbus(&power, true);
-    usleep(20000); /* Allow the lens electronics supply to settle before EF traffic. */
+    usleep(20000); /* Allow the externally powered lens electronics to settle. */
 
     if (strcmp(cmd, "ready") == 0) {
         uint8_t rx[4];
@@ -451,6 +454,26 @@ int main(int argc, char **argv) {
         if (rc >= 0) print_bytes("RX:", rx, sizeof(rx));
     } else if (strcmp(cmd, "init") == 0) {
         rc = do_init(&bus);
+
+        if (rc >= 0) {
+            uint8_t aperture_rx[2];
+
+            printf("init complete; enabling EN_VBAT for the lens motor...\n");
+            lens_power_set_vbat(&power, true);
+
+            /* Allow the TPS22968 motor rail to settle before commanding movement. */
+            usleep(10000);
+
+            printf("moving aperture from fully open using fast command 0x13 0x1A...\n");
+            rc = lens_aperture_move_code(&bus, 0x02u, aperture_rx);
+
+            if (rc >= 0) {
+                const uint8_t aperture_tx[2] = {0x13u, 0x1Au};
+                print_bytes("TX:", aperture_tx, sizeof(aperture_tx));
+                print_bytes("RX:", aperture_rx, sizeof(aperture_rx));
+            }
+            usleep(30000);
+        }
     } else if (strcmp(cmd, "status") == 0) {
         uint8_t status = 0, rx[3];
         rc = lens_read_status(&bus, &status, rx);
